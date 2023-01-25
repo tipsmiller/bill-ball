@@ -63,6 +63,7 @@ struct median_filter_t mFilter = {};
 int enabled = 0;
 int initialPositionX = 0;
 int initialPositionY = 0;
+double initialPositionHeading = 0.0;
 struct bno055_gravity_double_t dGravityXYZ = {};
 struct bno055_euler_double_t dEulerYPR = {};
 double sin60 = 0.86602540378;
@@ -86,13 +87,29 @@ void getPositionAdjustment() {
     //ESP_LOGI(TAG, "Adjustment for position: X %-1.2f\t Y %-1.2f", xPositionPid.lastOutput, yPositionPid.lastOutput);
 }
 
+double getHeadingAdjustment(double heading, double target) {
+    // find the angle between heading and target in the shortest direction
+    // heading is 0-2*PI
+    // shortest direction will always be |delta| <= PI
+    // if target = .25*PI and heading = .75*PI, result should be -.5*PI (which is target - heading)
+    // if target = .25*PI and heading = 1.75*PI, result should be +.5*PI (which is target - (heading - 2*PI))
+    // if target = 1.75*PI and heading = .25*PI, result should be -.5*PI (which is target - (heading + 2*PI))
+    double delta = target - heading;
+    if (delta >= M_PI) {
+        delta = target - (heading + 2*M_PI);
+    } else if (delta <= -M_PI) {
+        delta = target - (heading - 2*M_PI);
+    }
+    return delta;
+}
+
 void updateMotors(float vx, float vy, float vccw) {
     // M1 is aligned with X axis. D1 = Vx + 0*Vy
     // M2 is 30 deg below X axis. D2 = -sin(30)*Vx - sin(60)*Vy
     // M2 is (also) 30 deg below X axis. D2 = -sin(30)*Vx + sin(60)*Vy
-    float D1 = vx + 0.0*vy - vccw;
-    float D2 = -0.5*vx - sin60*vy - vccw;
-    float D3 = -0.5*vx + sin60*vy - vccw;
+    float D1 = vx + 0.0*vy + vccw;
+    float D2 = -0.5*vx - sin60*vy + vccw;
+    float D3 = -0.5*vx + sin60*vy + vccw;
     setDuty(&motor1Conf, getFeedForwardDutyFromDuty(&motor1Conf, D1, 0));
     setDuty(&motor2Conf, getFeedForwardDutyFromDuty(&motor2Conf, D2, 0));
     setDuty(&motor3Conf, getFeedForwardDutyFromDuty(&motor3Conf, D3, 0));
@@ -129,9 +146,8 @@ void controlLoop() {
             // put the gravity vectors into their PID loops to get balancing demands (setpoints = output from position PID)
             float vx = pid_update(&xGravityPID, sin(dEulerYPR.p), sin( 0.06 + xPositionPid.lastOutput));
             float vy = pid_update(&yGravityPID, sin(dEulerYPR.r), sin(-0.04 + yPositionPid.lastOutput));
-            float vccw = pid_update(&headingPID, dEulerYPR.h - M_PI, 0.0);
+            float vccw = pid_update(&headingPID, getHeadingAdjustment(dEulerYPR.h, initialPositionHeading), 0.0);
             //ESP_LOGI(TAG, "gravity x, gravity y: %-1.2f, %-1.2f", dGravityXYZ.y, -dGravityXYZ.x);
-            //ESP_LOGI(TAG, "heading: %-1.2f,\t ccw correction: %-1.2f", dEulerYPR.h - M_PI, -vccw);
             // update the motors
             updateMotors(vx, vy, vccw);
         } else {
@@ -139,14 +155,13 @@ void controlLoop() {
             pid_reset(&yGravityPID);
             pid_reset(&xPositionPid);
             pid_reset(&yPositionPid);
+            pid_reset(&headingPID);
             getPositionFromEncoders(&initialPositionX, &initialPositionY);
+            initialPositionHeading = dEulerYPR.h;
             disableMotor(&motor1Conf);
             disableMotor(&motor2Conf);
             disableMotor(&motor3Conf);
             ESP_LOGI(TAG, "disabled");
-            while(gpio_get_level(ENABLE_PIN)) {
-                vTaskDelay(100/portTICK_PERIOD_MS);
-            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
 }
